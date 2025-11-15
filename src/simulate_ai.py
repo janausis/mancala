@@ -41,7 +41,7 @@ def run_simulations(games: int = 1000, depth: int = 4, verbose: bool = False) ->
             for g in range(1, games + 1):
                 state = Mancala()
                 while not state.check_game_over():
-                    move = choose_best_move(state, depth=depth)
+                    move = choose_best_move(state, depth=depth, log=False)
                     if move is None:
                         break
                     state.make_move(move)
@@ -72,7 +72,7 @@ def run_simulations(games: int = 1000, depth: int = 4, verbose: bool = False) ->
         for g in range(1, games + 1):
             state = Mancala()
             while not state.check_game_over():
-                move = choose_best_move(state, depth=depth)
+                move = choose_best_move(state, depth=depth, log=False)
                 if move is None:
                     break
                 state.make_move(move)

@@ -129,7 +129,7 @@ def alpha_beta(
         return int(value)
 
 
-def choose_best_move(state: Mancala, depth: int = 8) -> Optional[int]:
+def choose_best_move(state: Mancala, depth: int = 8, log: bool = True) -> Optional[int]:
     """Return the best legal pit index for the current player, or None if no moves.
 
     The function performs a depth-limited alpha-beta search. If multiple moves
@@ -156,7 +156,8 @@ def choose_best_move(state: Mancala, depth: int = 8) -> Optional[int]:
             best_score = score
             best_move = move
 
-    print(f"Chosen move: Pit {best_move} with score {best_score}")
+    if log:
+        print(f"Chosen move: Pit {best_move} with score {best_score}")
     return best_move
 
 
