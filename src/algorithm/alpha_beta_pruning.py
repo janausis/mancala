@@ -1,58 +1,89 @@
-# alpha_beta_pruning.py
+"""Alpha-Beta search utilities for Mancala.
+
+This module provides a simple evaluation function, a standard minimax
+with alpha-beta pruning implementation, and a helper to pick the best
+move for the current player.
+"""
+from __future__ import annotations
+
 import math
+from typing import Optional
+
 from mancala.mancala import Mancala
-from typing import Optional, Tuple
+
+# Score constants used by the evaluation function
+_WIN_SCORE = 999_999
+_LOSE_SCORE = -999_999
+_DRAW_SCORE = 0
 
 
-# ==========================================
-# Evaluation Function
-# ==========================================
 def evaluate(state: Mancala, player: int) -> int:
-    """
-    Simple but strong heuristic:
-    - difference in house stones (most important)
-    - difference in total stones on board (less important)
-    - prefer moves that give extra turns later in the tree
+    """Evaluate `state` from the point-of-view of `player`.
+
+    Heuristic (descending importance):
+    - difference in house stones (multiplied): most important
+    - difference in stones on the side's pits: secondary
+
+    Returns a higher value when the position is better for `player`.
+    Terminal positions return large +/- constants.
     """
     if state.check_game_over():
-        w = state.get_winner()
-        if w == player:
-            return 999999
-        elif w == -1:
-            return 0
-        else:
-            return -999999
+        winner = state.get_winner()
+        if winner == player:
+            return _WIN_SCORE
+        if winner == -1:
+            return _DRAW_SCORE
+        return _LOSE_SCORE
 
-    p0 = state.board[state.player0_house]
-    p1 = state.board[state.player1_house]
+    # stones in each player's store
+    p0_house = state.board[state.player0_house]
+    p1_house = state.board[state.player1_house]
 
-    score_house = (p0 - p1) if player == 0 else (p1 - p0)
+    # primary score: house difference
+    house_diff = (p0_house - p1_house) if player == 0 else (p1_house - p0_house)
 
-    # Optional: slight influence from stones on board
+    # secondary: difference in stones on the actual pits (not counting houses)
     board_p0 = sum(state.board[0:state.player0_house])
-    board_p1 = sum(state.board[state.player0_house + 1: state.player1_house])
-    score_board = (board_p0 - board_p1) if player == 0 else (board_p1 - board_p0)
+    board_p1 = sum(state.board[state.player0_house + 1 : state.player1_house])
+    side_diff = (board_p0 - board_p1) if player == 0 else (board_p1 - board_p0)
 
-    return score_house * 10 + score_board
+    # weight the house difference more strongly
+    return int(house_diff * 10 + side_diff)
 
 
-# ==========================================
-# Alpha-Beta Pruning
-# ==========================================
+def clone_state(state: Mancala) -> Mancala:
+    """Create an independent copy of a Mancala state for search.
+
+    The Mancala class doesn't implement a copy method, so we construct
+    a fresh instance with the same board and metadata.
+    """
+    new = Mancala(stones_per_pit=0, pits_per_player=state.pits)
+    new.board = state.board.copy()
+    new.current_player = state.current_player
+    new.player0_house = state.player0_house
+    new.player1_house = state.player1_house
+    return new
+
+
 def alpha_beta(
-        state: Mancala,
-        depth: int,
-        alpha: float,
-        beta: float,
-        maximizing: bool,
-        player: int
+    state: Mancala,
+    depth: int,
+    alpha: float,
+    beta: float,
+    maximizing: bool,
+    player: int,
 ) -> int:
-    """
-    Standard minimax with alpha-beta pruning.
-    Returns evaluation score.
-    """
+    """Minimax with alpha-beta pruning.
 
-    # terminal or depth limit
+    - `state`: current game state (will not be mutated by the search)
+    - `depth`: remaining search depth (0 = evaluate)
+    - `alpha`, `beta`: current bounds
+    - `maximizing`: whether this node should maximize for `player`
+    - `player`: player index (0 or 1) we evaluate for
+
+    Returns an integer evaluation.
+    """
+    # Terminal or depth limit
     if depth == 0 or state.check_game_over():
         return evaluate(state, player)
 
@@ -61,85 +92,66 @@ def alpha_beta(
         return evaluate(state, player)
 
     if maximizing:
-        best = -math.inf
+        value = -math.inf
         for move in legal:
-            new_state = clone_state(state)
-            new_state.make_move(move)
+            child = clone_state(state)
+            child.make_move(move)
 
-            # If extra turn, same maximizing player moves again
-            next_maximizing = (new_state.current_player == player)
+            # if the move gives an extra turn, the same player moves again
+            next_max = (child.current_player == player)
 
-            score = alpha_beta(
-                new_state,
-                depth - 1,
-                alpha,
-                beta,
-                next_maximizing,
-                player
-            )
-
-            best = max(best, score)
-            alpha = max(alpha, best)
-            if beta <= alpha:
+            new_depth = depth if child.current_player == state.current_player else depth - 1
+            score = alpha_beta(child, new_depth, alpha, beta, next_max, player)
+            if score > value:
+                value = score
+            if value > alpha:
+                alpha = value
+            if alpha >= beta:
                 break
-        return best
+        return int(value)
 
     else:
-        best = math.inf
+        value = math.inf
         for move in legal:
-            new_state = clone_state(state)
-            new_state.make_move(move)
+            child = clone_state(state)
+            child.make_move(move)
 
-            next_maximizing = (new_state.current_player == player)
+            next_max = (child.current_player == player)
 
-            score = alpha_beta(
-                new_state,
-                depth - 1,
-                alpha,
-                beta,
-                next_maximizing,
-                player
-            )
-            best = min(best, score)
-            beta = min(beta, best)
-            if beta <= alpha:
+            new_depth = depth if child.current_player == state.current_player else depth - 1
+            score = alpha_beta(child, new_depth, alpha, beta, next_max, player)
+            if score < value:
+                value = score
+            if value < beta:
+                beta = value
+            if alpha >= beta:
                 break
-        return best
+        return int(value)
 
 
-# ==========================================
-# Choose Best Move
-# ==========================================
-def choose_best_move(state: Mancala, depth: int = 8) -> int:
+def choose_best_move(state: Mancala, depth: int = 8) -> Optional[int]:
+    """Return the best legal pit index for the current player, or None if no moves.
+
+    The function performs a depth-limited alpha-beta search. If multiple moves
+    share the same score, the first one encountered (leftmost) is returned
+    which keeps the behavior deterministic.
     """
-    Returns the best pit index for the AI to play.
-    """
-    player = state.current_player
     legal = state.legal_moves()
+    if not legal:
+        return None
 
-    best_move = None
-
-    if player == 0:
-        best_score = -math.inf
-    else:
-        best_score = -math.inf  # AI always maximizes relative to itself
+    player = state.current_player
+    best_move: Optional[int] = None
+    best_score = -math.inf
 
     for move in legal:
-        new_state = clone_state(state)
-        new_state.make_move(move)
+        child = clone_state(state)
+        child.make_move(move)
 
-        maximizing = (new_state.current_player == player)
+        next_max = (child.current_player == player)
+        new_depth = depth if child.current_player == state.current_player else depth - 1
+        score = alpha_beta(child, new_depth, -math.inf, math.inf, next_max, player)
 
-        score = alpha_beta(
-            new_state,
-            depth - 1,
-            -math.inf,
-            math.inf,
-            maximizing,
-            player
-        )
-
-        # Higher is always better for AI
         if score > best_score:
             best_score = score
             best_move = move
@@ -147,16 +159,4 @@ def choose_best_move(state: Mancala, depth: int = 8) -> int:
     return best_move
 
 
-# ==========================================
-# Small utility
-# ==========================================
-def clone_state(state: Mancala) -> Mancala:
-    """
-    Deep copy Mancala state manually because the class doesn't implement copy().
-    """
-    new = Mancala(stones_per_pit=0, pits_per_player=state.pits)
-    new.board = state.board.copy()
-    new.current_player = state.current_player
-    new.player0_house = state.player0_house
-    new.player1_house = state.player1_house
-    return new
+__all__ = ["evaluate", "alpha_beta", "choose_best_move", "clone_state"]
