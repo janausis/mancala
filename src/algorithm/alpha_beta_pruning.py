@@ -84,7 +84,7 @@ def alpha_beta(
     Returns an integer evaluation.
     """
     # Terminal or depth limit
-    if depth == 0 or state.check_game_over():
+    if depth <= 0 or state.check_game_over():
         return evaluate(state, player)
 
     legal = state.legal_moves()
@@ -130,6 +130,7 @@ def alpha_beta(
 
 
 def choose_best_move(state: Mancala, depth: int = 8, log: bool = True) -> Optional[int]:
+
     """Return the best legal pit index for the current player, or None if no moves.
 
     The function performs a depth-limited alpha-beta search. If multiple moves
