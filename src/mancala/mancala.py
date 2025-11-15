@@ -21,7 +21,7 @@ class Mancala:
         else:
             return [i for i in range(self.player0_house + 1, self.player1_house) if self.board[i] > 0]
 
-    def make_move(self, pit_index: int, animate_callback=None, anim_delay: float = 0.08) -> bool:
+    def make_move(self, pit_index: int, animate_callback=None, anim_delay: float = 0.3) -> bool:
         if pit_index not in self.legal_moves():
             raise ValueError("Invalid move")
         stones = self.board[pit_index]

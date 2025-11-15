@@ -1,8 +1,11 @@
-from time import sleep
+import enum
 from typing import List, Optional, Dict
 import pygame
 import sys
 from mancala.mancala import Mancala
+from src.algorithm.alpha_beta_pruning import choose_best_move, clone_state
+import threading
+import queue
 
 # ----------------------------
 # COLORS
@@ -38,21 +41,36 @@ pygame.init()
 FONT = pygame.font.SysFont(None, 26)
 BIG = pygame.font.SysFont(None, 36)
 
-WIDTH, HEIGHT = 900, 500
+WIDTH, HEIGHT = 830, 500
 SCREEN = pygame.display.set_mode((WIDTH, HEIGHT))
 CLOCK = pygame.time.Clock()
 
 PIT_RADIUS = 36
 HOUSE_W, HOUSE_H = 90, 160
 MARGIN = 20
-BOARD_TOP = (HEIGHT - HOUSE_H) / 2
+BOARD_TOP = int((HEIGHT - HOUSE_H) / 2)
+
+
+class PlayMode(enum.Enum):
+    HUMAN_VS_HUMAN = "HUMAN_VS_HUMAN"
+    HUMAN_VS_AI = "HUMAN_VS_AI"
+    AI_VS_AI = "AI_VS_AI"
+
+PLAY_MODE = PlayMode.AI_VS_AI
+ABP_DEPTH = 8
 
 # ----------------------------
 # Animation state
 # ----------------------------
 pit_flash: Dict[int, dict] = {}   # {idx: {"start":ms, "type":"gain"/"loss"}}
-EXTRA_TURN_START = None
-STEAL_START = None
+EXTRA_TURN_START: Optional[int] = None
+STEAL_START: Optional[int] = None
+animating = False
+
+# queue for animation frames produced by background worker threads
+anim_queue = queue.Queue()
+# optional lock if we need to protect state accesses (not strictly required with snapshot-based rendering)
+state_lock = threading.Lock()
 
 
 def flash_pit(idx: int, gain=True):
@@ -63,7 +81,7 @@ def flash_pit(idx: int, gain=True):
     }
 
 
-def draw_board(state: Mancala, highlight: Optional[List[int]] = None):
+def draw_board(state: Mancala, highlight: Optional[List[int]] = None, board_snapshot: Optional[List[int]] = None, current_player_override: Optional[int] = None):
     if highlight is None:
         highlight = []
 
@@ -71,10 +89,14 @@ def draw_board(state: Mancala, highlight: Optional[List[int]] = None):
 
     SCREEN.fill(COL_BG)
 
+    # allow rendering from a snapshot while an animation is in progress
+    board = board_snapshot if board_snapshot is not None else state.board
+    curr = current_player_override if current_player_override is not None else state.current_player
+
     # --- Title & turn text ---
-    turn_col = COL_P0_ACTIVE if state.current_player == 0 else COL_P1_ACTIVE
+    turn_col = COL_P0_ACTIVE if curr == 0 else COL_P1_ACTIVE
     SCREEN.blit(BIG.render("Mancala (Kalah rules)", True, COL_TEXT), (20, 10))
-    SCREEN.blit(FONT.render(f"Turn: Player {state.current_player + 1}", True, turn_col), (350, 12))
+    SCREEN.blit(FONT.render(f"Turn: Player {curr + 1}", True, turn_col), (350, 12))
 
     p = state.pits
     top_y = BOARD_TOP
@@ -88,8 +110,8 @@ def draw_board(state: Mancala, highlight: Optional[List[int]] = None):
     pygame.draw.rect(SCREEN, COL_P1_ACTIVE, left_house_rect, border_radius=12)
     pygame.draw.rect(SCREEN, COL_P0_ACTIVE, right_house_rect, border_radius=12)
 
-    left_count = str(state.board[state.player1_house])
-    right_count = str(state.board[state.player0_house])
+    left_count = str(board[state.player1_house])
+    right_count = str(board[state.player0_house])
 
     SCREEN.blit(BIG.render(left_count, True, COL_WHITE), (left_house_rect.centerx - 12, left_house_rect.centery - 18))
     SCREEN.blit(BIG.render(right_count, True, COL_WHITE), (right_house_rect.centerx - 12, right_house_rect.centery - 18))
@@ -108,7 +130,7 @@ def draw_board(state: Mancala, highlight: Optional[List[int]] = None):
         y = top_y + 12
         pit_positions[idx] = (x, y)
 
-        base = COL_P1_ACTIVE if state.current_player == 1 else COL_P1_INACTIVE
+        base = COL_P1_ACTIVE if curr == 1 else COL_P1_INACTIVE
 
         # Apply flash?
         flash_col = None
@@ -130,7 +152,7 @@ def draw_board(state: Mancala, highlight: Optional[List[int]] = None):
 
         color = flash_col if flash_col else (COL_HIGHLIGHT if idx in highlight else base)
         pygame.draw.circle(SCREEN, color, (x, y), PIT_RADIUS)
-        SCREEN.blit(FONT.render(str(state.board[idx]), True, COL_WHITE), (x - 8, y - 10))
+        SCREEN.blit(FONT.render(str(board[idx]), True, COL_WHITE), (x - 8, y - 10))
 
     # ----------------------------
     # Bottom row (Player 1 pits)
@@ -141,7 +163,7 @@ def draw_board(state: Mancala, highlight: Optional[List[int]] = None):
         y = bottom_y + 40
         pit_positions[idx] = (x, y)
 
-        base = COL_P0_ACTIVE if state.current_player == 0 else COL_P0_INACTIVE
+        base = COL_P0_ACTIVE if curr == 0 else COL_P0_INACTIVE
 
         flash_col = None
         if idx in pit_flash:
@@ -159,7 +181,7 @@ def draw_board(state: Mancala, highlight: Optional[List[int]] = None):
 
         color = flash_col if flash_col else (COL_HIGHLIGHT if idx in highlight else base)
         pygame.draw.circle(SCREEN, color, (x, y), PIT_RADIUS)
-        SCREEN.blit(FONT.render(str(state.board[idx]), True, COL_WHITE), (x - 8, y - 10))
+        SCREEN.blit(FONT.render(str(board[idx]), True, COL_WHITE), (x - 8, y - 10))
 
     # Borders / clickable regions
     interactive = {}
@@ -188,7 +210,7 @@ def draw_board(state: Mancala, highlight: Optional[List[int]] = None):
             if n < 0.35:
                 scale = n / 0.35
             else:
-                scale = max(0, 1 - (n - 0.35) / 0.65)
+                scale = max(0.0, 1 - (n - 0.35) / 0.65)
 
             size = int(20 + 60 * scale)
             font = pygame.font.SysFont(None, size)
@@ -212,7 +234,7 @@ def draw_board(state: Mancala, highlight: Optional[List[int]] = None):
             if n < 0.35:
                 scale = n / 0.35
             else:
-                scale = max(0, 1 - (n - 0.35) / 0.65)
+                scale = max(0.0, 1 - (n - 0.35) / 0.65)
 
             size = int(22 + 70 * scale)
             font = pygame.font.SysFont(None, size)
@@ -224,34 +246,118 @@ def draw_board(state: Mancala, highlight: Optional[List[int]] = None):
     return interactive, reset_rect
 
 
+def make_move_pygame(state: Mancala, clicked: int = None, is_ai: bool = False, anim_delay: float = 0.3):
+    """
+    Launch a background thread to execute the move (human or AI). The worker will enqueue intermediate
+    animation frames into `anim_queue` which the main loop will render, so time.sleep() inside
+    Mancala.make_move won't block the UI thread.
+    """
+    global animating
+
+    if animating:
+        return
+
+    animating = True
+
+    def worker(move_to_play: Optional[int]):
+        # snapshot before
+        before_player = state.current_player
+        before_board = state.board.copy()
+
+        # If AI and no move provided, compute move on a cloned snapshot so the search doesn't race with the real state
+        if is_ai and move_to_play is None:
+            cloned = clone_state(state)
+            move = choose_best_move(cloned, depth=ABP_DEPTH)
+        else:
+            move = move_to_play
+
+        # animate callback: enqueue frames (copies) for the main thread to render
+        def worker_anim_callback(board_snapshot, last_idx):
+            anim_queue.put(("frame", board_snapshot.copy(), last_idx))
+
+        # perform the move (this mutates the shared state)
+        state.make_move(move, animate_callback=worker_anim_callback, anim_delay=anim_delay)
+
+        # snapshot after
+        after_board = state.board.copy()
+        after_player = state.current_player
+
+        # enqueue done event with enough info for the main thread to detect steal/extra-turn
+        anim_queue.put(("done", before_player, before_board, after_board, after_player))
+
+    t = threading.Thread(target=worker, args=(clicked,), daemon=True)
+    t.start()
+
+
 # ================================================================
 # MAIN LOOP
 # ================================================================
 def main():
-    global EXTRA_TURN_START
+    global EXTRA_TURN_START, animating
     state = Mancala()
     running = True
-    animating = False
+
 
     # Snapshot board to track flashes
     last_board = state.board.copy()
 
-    def animate_callback(board_snapshot, last_idx):
-        nonlocal last_board
-
-        # detect which pits changed this frame
-        for i in range(len(last_board)):
-            if last_board[i] != board_snapshot[i]:
-                gain = board_snapshot[i] > last_board[i]
-                flash_pit(i, gain=gain)
-
-        last_board = board_snapshot.copy()
-
-        draw_board(state)
-        pygame.display.flip()
-
     while running:
-        CLOCK.tick(60)
+        CLOCK.tick(120)
+
+        # First, process any animation frames queued by background workers
+        while not anim_queue.empty():
+            item = anim_queue.get()
+            if item[0] == "frame":
+                _, board_snapshot, last_idx = item
+
+                # detect which pits changed this frame
+                for i in range(len(last_board)):
+                    if last_board[i] != board_snapshot[i]:
+                        # Only flash positive changes during intermediate frames.
+                        # Negative changes happen as stones are sown and should not
+                        # cause a red "stolen" flash here.
+                        if board_snapshot[i] > last_board[i]:
+                            flash_pit(i, gain=True)
+
+                last_board = board_snapshot.copy()
+
+                draw_board(state, board_snapshot=board_snapshot)
+                pygame.display.flip()
+
+            elif item[0] == "done":
+                _, before_player, before_board, after_board, after_player = item
+
+                # Detect steal: your house increases AND opposite pit goes to 0
+                stolen_pits = []
+                if before_player == 0:
+                    my_house = state.player0_house
+                    opp_range = range(state.player0_house + 1, state.player1_house)  # opponent pits
+                else:
+                    my_house = state.player1_house
+                    opp_range = range(0, state.player0_house)
+
+                # If the player's house gained stones, check which opponent pits
+                # went from non-zero -> zero; those are the actual stolen pits.
+                if after_board[my_house] > before_board[my_house]:
+                    for opp in opp_range:
+                        if before_board[opp] != 0 and after_board[opp] == 0:
+                            stolen_pits.append(opp)
+
+                if stolen_pits:
+                    # flash each stolen pit as a loss (red)
+                    for opp in stolen_pits:
+                        flash_pit(opp, gain=False)
+                    global STEAL_START
+                    STEAL_START = pygame.time.get_ticks()
+
+                # Detect extra turn
+                if before_player == after_player:
+                    EXTRA_TURN_START = pygame.time.get_ticks()
+
+                # worker finished
+                animating = False
+
+        # Regular draw (when not rendering an intermediate animation frame)
         interactive, reset_rect = draw_board(state)
 
         mx, my = pygame.mouse.get_pos()
@@ -277,14 +383,15 @@ def main():
                 running = False
                 break
 
-            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not animating:
+            if reset_rect.collidepoint((mx, my)) and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not animating:
+                state = Mancala()
+                last_board = state.board.copy()
+                EXTRA_TURN_START = None
+                continue
+
+            if (PLAY_MODE == PlayMode.HUMAN_VS_HUMAN or PLAY_MODE == PlayMode.HUMAN_VS_AI and state.current_player == 0) and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not animating:
                 mx, my = event.pos
 
-                if reset_rect.collidepoint((mx, my)):
-                    state = Mancala()
-                    last_board = state.board.copy()
-                    EXTRA_TURN_START = None
-                    continue
 
                 clicked = None
                 for idx, rect in interactive.items():
@@ -293,44 +400,20 @@ def main():
                         break
 
                 if clicked is not None and clicked in state.legal_moves():
-                    animating = True
+                    make_move_pygame(state, clicked, is_ai=False)
 
-                    before_player = state.current_player
-                    before_board = state.board.copy()
 
-                    state.make_move(clicked, animate_callback=animate_callback, anim_delay=0.2)
-                    # --- final capture flash detection (after move finishes) ---
-                    steal_happened = False
+        # ========= AI MOVE =========
+        if not state.check_game_over():
+            if PLAY_MODE == PlayMode.HUMAN_VS_AI:
+                if not animating and state.current_player == 1:
+                    # spawn background thread that will compute the best move and animate it
+                    make_move_pygame(state, clicked=None, is_ai=True)
 
-                    # Detect steal: your house increases AND opposite pit goes to 0
-                    # Use the player who made the move (before_player) and compare against before_board
-                    if before_player == 0:
-                        my_house = state.player0_house
-                        opp_range = range(state.player0_house + 1, state.player1_house)  # opponent pits
-                    else:
-                        my_house = state.player1_house
-                        opp_range = range(0, state.player0_house)
+            if PLAY_MODE == PlayMode.AI_VS_AI:
+                if not animating:
+                    make_move_pygame(state, clicked=None, is_ai=True)
 
-                    # If our house increased compared to the board before the move, and any opponent pit
-                    # that previously had stones is now 0, we consider it a steal.
-                    if state.board[my_house] > before_board[my_house]:
-                        for opp in opp_range:
-                            if before_board[opp] != 0 and state.board[opp] == 0:
-                                steal_happened = True
-                                break
-
-                    if steal_happened:
-                        global STEAL_START
-                        STEAL_START = pygame.time.get_ticks()
-
-                    last_board = state.board.copy()
-
-                    after_player = state.current_player
-                    # Detect extra turn
-                    if before_player == after_player:
-                        EXTRA_TURN_START = pygame.time.get_ticks()
-
-                    animating = False
 
     pygame.quit()
     sys.exit()
