@@ -156,6 +156,7 @@ def choose_best_move(state: Mancala, depth: int = 8) -> Optional[int]:
             best_score = score
             best_move = move
 
+    print(f"Chosen move: Pit {best_move} with score {best_score}")
     return best_move
 
 
